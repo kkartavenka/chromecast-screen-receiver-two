@@ -105,7 +105,7 @@
     </div>
 
     <div id="videoContainer">
-        <video id="remoteVideo" autoplay playsinline></video>
+        <video id="remoteVideo" autoplay playsinline muted></video>
         <div id="overlay">
             <span id="status" class="connecting">Connecting...</span>
             <span id="fps">FPS: --</span>
@@ -305,9 +305,16 @@
                 log('RTCPeerConnection created');
 
                 pc.ontrack = (event) => {
-                    log(`Track received: ${event.track.kind}`);
+                    log(`Track received: ${event.track.kind}, streams: ${event.streams.length}`);
                     if (event.track.kind === 'video') {
-                        videoEl.srcObject = event.streams[0];
+                        const stream = event.streams[0] || new MediaStream([event.track]);
+                        log(`Using stream with ${stream.getTracks().length} track(s), id=${stream.id}`);
+                        videoEl.srcObject = stream;
+                        videoEl.play().then(() => {
+                            log('Video play() started');
+                        }).catch(e => {
+                            log('Video play() error: ' + e.message, 'err');
+                        });
                         splashEl.classList.add('hidden');
                         setStatus('Streaming', 'connected');
                         startFpsCounter();
