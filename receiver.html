@@ -80,11 +80,26 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         .hidden { opacity: 0; pointer-events: none; }
+        #debugLog {
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            max-height: 40vh;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.85);
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            padding: 8px;
+            z-index: 30;
+            color: #0f0;
+        }
+        #debugLog div { padding: 1px 0; }
+        #debugLog .err { color: #f44; }
+        #debugLog .warn { color: #fa0; }
     </style>
 </head>
 <body>
     <div id="splashScreen">
-        <h1>ChromeCast WebRTC Receiver</h1>
+        <h1>ChromeCast WebRTC Receiver v3</h1>
         <div class="spinner"></div>
         <p id="splashStatus">Initializing...</p>
     </div>
@@ -97,6 +112,8 @@
         </div>
     </div>
 
+    <div id="debugLog"></div>
+
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
         const CAST_CHANNEL = 'urn:x-cast:com.webrtc.signaling';
@@ -105,13 +122,23 @@
         const splashEl = document.getElementById('splashScreen');
         const splashStatusEl = document.getElementById('splashStatus');
         const videoEl = document.getElementById('remoteVideo');
+        const debugLogEl = document.getElementById('debugLog');
 
         let pc = null;
-        let sendMessage = null; // function to send signaling messages
+        let sendMessage = null;
         let isCastDevice = false;
         let castSenderId = null;
 
-        function log(msg) { console.log(`[Receiver] ${msg}`); }
+        function log(msg, level) {
+            console.log(`[Receiver] ${msg}`);
+            const div = document.createElement('div');
+            if (level === 'err') div.className = 'err';
+            if (level === 'warn') div.className = 'warn';
+            const ts = new Date().toLocaleTimeString();
+            div.textContent = `[${ts}] ${msg}`;
+            debugLogEl.appendChild(div);
+            debugLogEl.scrollTop = debugLogEl.scrollHeight;
+        }
 
         function setStatus(text, cls) {
             statusEl.textContent = text;
@@ -120,6 +147,10 @@
         }
 
         function initSignaling() {
+            log('initSignaling called');
+            log('cast available: ' + (typeof cast !== 'undefined'));
+            log('cast.framework: ' + (typeof cast !== 'undefined' && !!cast.framework));
+
             if (typeof cast !== 'undefined' && cast.framework) {
                 initCastSignaling();
             } else {
@@ -128,55 +159,85 @@
             }
         }
 
-        // --- Cast SDK message bus signaling ---
         function initCastSignaling() {
             isCastDevice = true;
             log('Initializing Cast message bus signaling');
             setStatus('Cast device - waiting for sender...', 'connecting');
 
-            const context = cast.framework.CastReceiverContext.getInstance();
+            try {
+                const context = cast.framework.CastReceiverContext.getInstance();
+                log('Got CastReceiverContext');
 
-            context.addCustomMessageListener(CAST_CHANNEL, event => {
-                log(`Cast msg from ${event.senderId}: ${event.data?.type || 'unknown'}`);
-                castSenderId = event.senderId;
-                handleSignalingMessage(event.data);
-            });
-
-            sendMessage = (msg) => {
-                if (castSenderId) {
-                    log(`Cast send: ${msg.type} to ${castSenderId}`);
-                    context.sendCustomMessage(CAST_CHANNEL, castSenderId, msg);
-                } else {
-                    log('No Cast sender ID yet, cannot send');
-                }
-            };
-
-            context.addEventListener(
-                cast.framework.system.EventType.SENDER_CONNECTED, event => {
-                    log('Cast sender connected: ' + event.senderId);
-                    castSenderId = event.senderId;
-                    setStatus('Sender connected', 'connecting');
-                    sendMessage({ type: 'Ready', payload: 'cast-receiver' });
-                });
-
-            context.addEventListener(
-                cast.framework.system.EventType.SENDER_DISCONNECTED, event => {
-                    log('Cast sender disconnected');
-                    if (context.getSenders().length === 0) {
-                        log('No more senders');
-                        setStatus('No senders', 'error');
+                context.addCustomMessageListener(CAST_CHANNEL, event => {
+                    try {
+                        log(`Cast msg from ${event.senderId}: type=${event.data?.type}`);
+                        castSenderId = event.senderId;
+                        handleSignalingMessage(event.data);
+                    } catch (e) {
+                        log('Error handling cast msg: ' + e.message, 'err');
                     }
                 });
+                log('Custom message listener registered for ' + CAST_CHANNEL);
 
-            const options = new cast.framework.CastReceiverOptions();
-            options.disableIdleTimeout = true;
-            options.customNamespaces = {};
-            options.customNamespaces[CAST_CHANNEL] = cast.framework.system.MessageType.JSON;
-            context.start(options);
-            log('Cast receiver context started with custom namespace');
+                sendMessage = (msg) => {
+                    if (castSenderId) {
+                        try {
+                            log(`Cast send: ${msg.type} to ${castSenderId}`);
+                            context.sendCustomMessage(CAST_CHANNEL, castSenderId, msg);
+                            log('Cast send OK');
+                        } catch (e) {
+                            log('Cast send error: ' + e.message, 'err');
+                        }
+                    } else {
+                        log('No Cast sender ID yet, cannot send', 'warn');
+                    }
+                };
+
+                context.addEventListener(
+                    cast.framework.system.EventType.SENDER_CONNECTED, event => {
+                        log('SENDER_CONNECTED: ' + event.senderId);
+                        castSenderId = event.senderId;
+                        setStatus('Sender connected', 'connecting');
+                        sendMessage({ type: 'Ready', payload: 'cast-receiver' });
+                    });
+
+                context.addEventListener(
+                    cast.framework.system.EventType.SENDER_DISCONNECTED, event => {
+                        log('SENDER_DISCONNECTED: ' + (event.senderId || 'unknown'), 'warn');
+                        if (context.getSenders().length === 0) {
+                            log('No more senders');
+                            setStatus('No senders', 'error');
+                        }
+                    });
+
+                context.addEventListener(
+                    cast.framework.system.EventType.ERROR, event => {
+                        log('Cast ERROR event: ' + JSON.stringify(event), 'err');
+                    });
+
+                const options = new cast.framework.CastReceiverOptions();
+                options.disableIdleTimeout = true;
+                options.customNamespaces = {};
+                options.customNamespaces[CAST_CHANNEL] = cast.framework.system.MessageType.JSON;
+                log('Starting Cast receiver context...');
+                context.start(options);
+                log('Cast receiver context started');
+
+                const senders = context.getSenders();
+                log('Current senders: ' + senders.length);
+                if (senders.length > 0) {
+                    castSenderId = senders[0].id;
+                    log('Using existing sender: ' + castSenderId);
+                    sendMessage({ type: 'Ready', payload: 'cast-receiver' });
+                }
+
+            } catch (e) {
+                log('Cast init FATAL: ' + e.message, 'err');
+                log('Stack: ' + e.stack, 'err');
+                initWebSocketSignaling();
+            }
         }
 
-        // --- WebSocket signaling (browser fallback) ---
         function initWebSocketSignaling() {
             const urlParams = new URLSearchParams(location.search);
             const wsHost = urlParams.get('wshost') || location.hostname;
@@ -201,13 +262,13 @@
             };
 
             ws.onclose = () => {
-                log('WebSocket disconnected');
+                log('WebSocket disconnected', 'warn');
                 setStatus('Disconnected - retrying...', 'error');
                 setTimeout(() => initWebSocketSignaling(), 3000);
             };
 
-            ws.onerror = (err) => {
-                log(`WebSocket error`);
+            ws.onerror = () => {
+                log('WebSocket error', 'err');
                 setStatus('Connection error', 'error');
             };
 
@@ -218,8 +279,8 @@
             };
         }
 
-        // --- Unified signaling message handler ---
         function handleSignalingMessage(msg) {
+            log('handleSignalingMessage: ' + msg.type);
             switch (msg.type) {
                 case 'SdpOffer':
                     handleOffer(msg.payload);
@@ -227,52 +288,68 @@
                 case 'IceCandidate':
                     handleIceCandidate(msg.payload);
                     break;
+                default:
+                    log('Unknown message type: ' + msg.type, 'warn');
             }
         }
 
         async function handleOffer(sdp) {
-            log('Creating peer connection from offer');
+            try {
+                log('handleOffer: creating RTCPeerConnection');
+                log('RTCPeerConnection available: ' + (typeof RTCPeerConnection !== 'undefined'));
 
-            pc = new RTCPeerConnection({ iceServers: [] });
+                const config = {
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                };
+                pc = new RTCPeerConnection(config);
+                log('RTCPeerConnection created');
 
-            pc.ontrack = (event) => {
-                log(`Track received: ${event.track.kind}`);
-                if (event.track.kind === 'video') {
-                    videoEl.srcObject = event.streams[0];
-                    splashEl.classList.add('hidden');
-                    setStatus('Streaming', 'connected');
-                    startFpsCounter();
-                }
-            };
+                pc.ontrack = (event) => {
+                    log(`Track received: ${event.track.kind}`);
+                    if (event.track.kind === 'video') {
+                        videoEl.srcObject = event.streams[0];
+                        splashEl.classList.add('hidden');
+                        setStatus('Streaming', 'connected');
+                        startFpsCounter();
+                    }
+                };
 
-            pc.onicecandidate = (event) => {
-                if (event.candidate && sendMessage) {
-                    sendMessage({
-                        type: 'IceCandidate',
-                        payload: JSON.stringify(event.candidate.toJSON())
-                    });
-                }
-            };
+                pc.onicecandidate = (event) => {
+                    if (event.candidate && sendMessage) {
+                        log('Sending ICE candidate');
+                        sendMessage({
+                            type: 'IceCandidate',
+                            payload: JSON.stringify(event.candidate.toJSON())
+                        });
+                    }
+                };
 
-            pc.onconnectionstatechange = () => {
-                log(`WebRTC state: ${pc.connectionState}`);
-                if (pc.connectionState === 'connected') {
-                    setStatus('Connected', 'connected');
-                } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-                    setStatus('Disconnected', 'error');
-                }
-            };
+                pc.onconnectionstatechange = () => {
+                    log(`WebRTC state: ${pc.connectionState}`);
+                    if (pc.connectionState === 'connected') {
+                        setStatus('Connected', 'connected');
+                        debugLogEl.style.display = 'none';
+                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                        setStatus('Disconnected', 'error');
+                    }
+                };
 
-            pc.addTransceiver('video', { direction: 'recvonly' });
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                log('Transceiver added');
 
-            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-            log('Remote description set');
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+                log('Remote description set (offer applied)');
 
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            log('Local description set');
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                log('Local description set (answer created)');
 
-            sendMessage({ type: 'SdpAnswer', payload: answer.sdp });
+                sendMessage({ type: 'SdpAnswer', payload: answer.sdp });
+                log('SDP answer sent');
+            } catch (e) {
+                log('handleOffer ERROR: ' + e.message, 'err');
+                log('Stack: ' + e.stack, 'err');
+            }
         }
 
         async function handleIceCandidate(candidateJson) {
@@ -283,7 +360,7 @@
                     log('Added remote ICE candidate');
                 }
             } catch (e) {
-                log(`ICE error: ${e}`);
+                log(`ICE error: ${e.message}`, 'err');
             }
         }
 
@@ -299,6 +376,7 @@
             }, 1000);
         }
 
+        log('Page loaded, calling initSignaling');
         initSignaling();
     </script>
 </body>
