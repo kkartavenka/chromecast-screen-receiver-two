@@ -334,15 +334,20 @@
                     }
                 };
 
-                pc.addTransceiver('video', { direction: 'recvonly' });
-                log('Transceiver added');
-
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
                 log('Remote description set (offer applied)');
 
+                const transceivers = pc.getTransceivers();
+                log('Transceivers after offer: ' + transceivers.length);
+                for (const t of transceivers) {
+                    log(`  mid=${t.mid} dir=${t.direction} kind=${t.receiver?.track?.kind}`);
+                }
+
                 const answer = await pc.createAnswer();
+                log('Answer created, SDP length=' + answer.sdp.length);
+
                 await pc.setLocalDescription(answer);
-                log('Local description set (answer created)');
+                log('Local description set (answer applied)');
 
                 sendMessage({ type: 'SdpAnswer', payload: answer.sdp });
                 log('SDP answer sent');
