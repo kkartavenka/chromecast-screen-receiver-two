@@ -337,6 +337,8 @@
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
                 log('Remote description set (offer applied)');
 
+                await drainPendingCandidates();
+
                 const transceivers = pc.getTransceivers();
                 log('Transceivers after offer: ' + transceivers.length);
                 for (const t of transceivers) {
@@ -344,7 +346,7 @@
                 }
 
                 const answer = await pc.createAnswer();
-                log('Answer created, SDP length=' + answer.sdp.length);
+                log('Answer SDP (first 200): ' + answer.sdp.substring(0, 200));
 
                 await pc.setLocalDescription(answer);
                 log('Local description set (answer applied)');
@@ -357,15 +359,36 @@
             }
         }
 
+        let pendingCandidates = [];
+
         async function handleIceCandidate(candidateJson) {
             try {
                 const candidate = JSON.parse(candidateJson);
-                if (pc && candidate.candidate) {
+                if (!candidate.candidate) return;
+
+                if (pc && pc.remoteDescription) {
                     await pc.addIceCandidate(new RTCIceCandidate(candidate));
                     log('Added remote ICE candidate');
+                } else {
+                    pendingCandidates.push(candidate);
+                    log('Queued ICE candidate (pc not ready yet)');
                 }
             } catch (e) {
                 log(`ICE error: ${e.message}`, 'err');
+            }
+        }
+
+        async function drainPendingCandidates() {
+            if (pendingCandidates.length > 0) {
+                log(`Draining ${pendingCandidates.length} queued ICE candidates`);
+                for (const c of pendingCandidates) {
+                    try {
+                        await pc.addIceCandidate(new RTCIceCandidate(c));
+                    } catch (e) {
+                        log(`Queued ICE error: ${e.message}`, 'err');
+                    }
+                }
+                pendingCandidates = [];
             }
         }
 
