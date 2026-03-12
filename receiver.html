@@ -86,7 +86,7 @@
     <div id="splashScreen">
         <h1>ChromeCast WebRTC Receiver</h1>
         <div class="spinner"></div>
-        <p id="splashStatus">Connecting to signaling server...</p>
+        <p id="splashStatus">Initializing...</p>
     </div>
 
     <div id="videoContainer">
@@ -99,10 +99,7 @@
 
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
-        const urlParams = new URLSearchParams(location.search);
-        const wsHost = urlParams.get('wshost') || location.hostname;
-        const wsPort = urlParams.get('wsport') || location.port || '8088';
-        const WS_URL = `ws://${wsHost}:${wsPort}`;
+        const CAST_CHANNEL = 'urn:x-cast:com.webrtc.signaling';
         const statusEl = document.getElementById('status');
         const fpsEl = document.getElementById('fps');
         const splashEl = document.getElementById('splashScreen');
@@ -110,8 +107,9 @@
         const videoEl = document.getElementById('remoteVideo');
 
         let pc = null;
-        let ws = null;
-        let castContext = null;
+        let sendMessage = null; // function to send signaling messages
+        let isCastDevice = false;
+        let castSenderId = null;
 
         function log(msg) { console.log(`[Receiver] ${msg}`); }
 
@@ -121,40 +119,74 @@
             splashStatusEl.textContent = text;
         }
 
-        function initCastReceiver() {
-            try {
-                if (typeof cast !== 'undefined' && cast.framework) {
-                    castContext = cast.framework.CastReceiverContext.getInstance();
-
-                    castContext.addEventListener(
-                        cast.framework.system.EventType.SENDER_CONNECTED, (event) => {
-                            log('Cast sender connected: ' + event.senderId);
-                        });
-
-                    castContext.addEventListener(
-                        cast.framework.system.EventType.SENDER_DISCONNECTED, (event) => {
-                            log('Cast sender disconnected: ' + event.senderId);
-                            if (castContext.getSenders().length === 0) {
-                                log('No more senders, closing');
-                                window.close();
-                            }
-                        });
-
-                    const options = new cast.framework.CastReceiverOptions();
-                    options.disableIdleTimeout = true;
-                    castContext.start(options);
-                    log('Cast receiver context started');
-                } else {
-                    log('Cast SDK not available (running in browser mode)');
-                }
-            } catch (e) {
-                log('Cast init error (probably not on a Cast device): ' + e.message);
+        function initSignaling() {
+            if (typeof cast !== 'undefined' && cast.framework) {
+                initCastSignaling();
+            } else {
+                log('Cast SDK not available, falling back to WebSocket');
+                initWebSocketSignaling();
             }
         }
 
-        function connectWebSocket() {
-            log(`Connecting to ${WS_URL}`);
-            ws = new WebSocket(WS_URL);
+        // --- Cast SDK message bus signaling ---
+        function initCastSignaling() {
+            isCastDevice = true;
+            log('Initializing Cast message bus signaling');
+            setStatus('Cast device - waiting for sender...', 'connecting');
+
+            const context = cast.framework.CastReceiverContext.getInstance();
+
+            context.addCustomMessageListener(CAST_CHANNEL, event => {
+                log(`Cast msg from ${event.senderId}: ${event.data?.type || 'unknown'}`);
+                castSenderId = event.senderId;
+                handleSignalingMessage(event.data);
+            });
+
+            sendMessage = (msg) => {
+                if (castSenderId) {
+                    log(`Cast send: ${msg.type} to ${castSenderId}`);
+                    context.sendCustomMessage(CAST_CHANNEL, castSenderId, msg);
+                } else {
+                    log('No Cast sender ID yet, cannot send');
+                }
+            };
+
+            context.addEventListener(
+                cast.framework.system.EventType.SENDER_CONNECTED, event => {
+                    log('Cast sender connected: ' + event.senderId);
+                    castSenderId = event.senderId;
+                    setStatus('Sender connected', 'connecting');
+                    sendMessage({ type: 'Ready', payload: 'cast-receiver' });
+                });
+
+            context.addEventListener(
+                cast.framework.system.EventType.SENDER_DISCONNECTED, event => {
+                    log('Cast sender disconnected');
+                    if (context.getSenders().length === 0) {
+                        log('No more senders');
+                        setStatus('No senders', 'error');
+                    }
+                });
+
+            const options = new cast.framework.CastReceiverOptions();
+            options.disableIdleTimeout = true;
+            options.customNamespaces = {};
+            options.customNamespaces[CAST_CHANNEL] = cast.framework.system.MessageType.JSON;
+            context.start(options);
+            log('Cast receiver context started with custom namespace');
+        }
+
+        // --- WebSocket signaling (browser fallback) ---
+        function initWebSocketSignaling() {
+            const urlParams = new URLSearchParams(location.search);
+            const wsHost = urlParams.get('wshost') || location.hostname;
+            const wsPort = urlParams.get('wsport') || location.port || '8088';
+            const WS_URL = `ws://${wsHost}:${wsPort}`;
+
+            log(`Connecting WebSocket to ${WS_URL}`);
+            setStatus('Connecting WebSocket...', 'connecting');
+
+            const ws = new WebSocket(WS_URL);
 
             ws.onopen = () => {
                 log('WebSocket connected');
@@ -162,38 +194,46 @@
                 ws.send(JSON.stringify({ type: 'Ready', payload: 'browser-receiver' }));
             };
 
-            ws.onmessage = async (evt) => {
+            ws.onmessage = (evt) => {
                 const msg = JSON.parse(evt.data);
                 log(`WS received: ${msg.type}`);
-
-                switch (msg.type) {
-                    case 'SdpOffer':
-                        await handleOffer(msg.payload);
-                        break;
-                    case 'IceCandidate':
-                        await handleIceCandidate(msg.payload);
-                        break;
-                }
+                handleSignalingMessage(msg);
             };
 
             ws.onclose = () => {
                 log('WebSocket disconnected');
                 setStatus('Disconnected - retrying...', 'error');
-                setTimeout(connectWebSocket, 3000);
+                setTimeout(() => initWebSocketSignaling(), 3000);
             };
 
             ws.onerror = (err) => {
-                log(`WebSocket error: ${err}`);
+                log(`WebSocket error`);
                 setStatus('Connection error', 'error');
+            };
+
+            sendMessage = (msg) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(msg));
+                }
             };
         }
 
-        async function handleOffer(sdp) {
-            log('Creating peer connection');
+        // --- Unified signaling message handler ---
+        function handleSignalingMessage(msg) {
+            switch (msg.type) {
+                case 'SdpOffer':
+                    handleOffer(msg.payload);
+                    break;
+                case 'IceCandidate':
+                    handleIceCandidate(msg.payload);
+                    break;
+            }
+        }
 
-            pc = new RTCPeerConnection({
-                iceServers: []
-            });
+        async function handleOffer(sdp) {
+            log('Creating peer connection from offer');
+
+            pc = new RTCPeerConnection({ iceServers: [] });
 
             pc.ontrack = (event) => {
                 log(`Track received: ${event.track.kind}`);
@@ -206,17 +246,16 @@
             };
 
             pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    log(`Sending ICE candidate`);
-                    ws.send(JSON.stringify({
+                if (event.candidate && sendMessage) {
+                    sendMessage({
                         type: 'IceCandidate',
                         payload: JSON.stringify(event.candidate.toJSON())
-                    }));
+                    });
                 }
             };
 
             pc.onconnectionstatechange = () => {
-                log(`Connection state: ${pc.connectionState}`);
+                log(`WebRTC state: ${pc.connectionState}`);
                 if (pc.connectionState === 'connected') {
                     setStatus('Connected', 'connected');
                 } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -226,18 +265,14 @@
 
             pc.addTransceiver('video', { direction: 'recvonly' });
 
-            const offer = new RTCSessionDescription({ type: 'offer', sdp: sdp });
-            await pc.setRemoteDescription(offer);
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
             log('Remote description set');
 
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             log('Local description set');
 
-            ws.send(JSON.stringify({
-                type: 'SdpAnswer',
-                payload: answer.sdp
-            }));
+            sendMessage({ type: 'SdpAnswer', payload: answer.sdp });
         }
 
         async function handleIceCandidate(candidateJson) {
@@ -253,12 +288,10 @@
         }
 
         function startFpsCounter() {
-            const video = videoEl;
             let lastFrames = 0;
-
             setInterval(() => {
-                if (video.getVideoPlaybackQuality) {
-                    const q = video.getVideoPlaybackQuality();
+                if (videoEl.getVideoPlaybackQuality) {
+                    const q = videoEl.getVideoPlaybackQuality();
                     const frames = q.totalVideoFrames - lastFrames;
                     lastFrames = q.totalVideoFrames;
                     fpsEl.textContent = `FPS: ${frames}`;
@@ -266,8 +299,7 @@
             }, 1000);
         }
 
-        initCastReceiver();
-        connectWebSocket();
+        initSignaling();
     </script>
 </body>
 </html>
