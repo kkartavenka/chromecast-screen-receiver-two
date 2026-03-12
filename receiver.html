@@ -98,7 +98,10 @@
     </div>
 
     <script>
-        const WS_URL = `ws://${location.hostname}:8089`;
+        const urlParams = new URLSearchParams(location.search);
+        const wsHost = urlParams.get('wshost') || location.hostname;
+        const wsPort = urlParams.get('wsport') || '8089';
+        const WS_URL = `ws://${wsHost}:${wsPort}`;
         const statusEl = document.getElementById('status');
         const fpsEl = document.getElementById('fps');
         const splashEl = document.getElementById('splashScreen');
