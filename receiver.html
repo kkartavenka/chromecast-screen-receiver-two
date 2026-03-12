@@ -97,6 +97,7 @@
         </div>
     </div>
 
+    <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
         const urlParams = new URLSearchParams(location.search);
         const wsHost = urlParams.get('wshost') || location.hostname;
@@ -110,8 +111,7 @@
 
         let pc = null;
         let ws = null;
-        let frameCount = 0;
-        let lastFpsTime = performance.now();
+        let castContext = null;
 
         function log(msg) { console.log(`[Receiver] ${msg}`); }
 
@@ -119,6 +119,37 @@
             statusEl.textContent = text;
             statusEl.className = cls || '';
             splashStatusEl.textContent = text;
+        }
+
+        function initCastReceiver() {
+            try {
+                if (typeof cast !== 'undefined' && cast.framework) {
+                    castContext = cast.framework.CastReceiverContext.getInstance();
+
+                    castContext.addEventListener(
+                        cast.framework.system.EventType.SENDER_CONNECTED, (event) => {
+                            log('Cast sender connected: ' + event.senderId);
+                        });
+
+                    castContext.addEventListener(
+                        cast.framework.system.EventType.SENDER_DISCONNECTED, (event) => {
+                            log('Cast sender disconnected: ' + event.senderId);
+                            if (castContext.getSenders().length === 0) {
+                                log('No more senders, closing');
+                                window.close();
+                            }
+                        });
+
+                    const options = new cast.framework.CastReceiverOptions();
+                    options.disableIdleTimeout = true;
+                    castContext.start(options);
+                    log('Cast receiver context started');
+                } else {
+                    log('Cast SDK not available (running in browser mode)');
+                }
+            } catch (e) {
+                log('Cast init error (probably not on a Cast device): ' + e.message);
+            }
         }
 
         function connectWebSocket() {
@@ -235,6 +266,7 @@
             }, 1000);
         }
 
+        initCastReceiver();
         connectWebSocket();
     </script>
 </body>
