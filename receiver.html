@@ -101,7 +101,7 @@
     <script>
         const urlParams = new URLSearchParams(location.search);
         const wsHost = urlParams.get('wshost') || location.hostname;
-        const wsPort = urlParams.get('wsport') || '8089';
+        const wsPort = urlParams.get('wsport') || location.port || '8088';
         const WS_URL = `ws://${wsHost}:${wsPort}`;
         const statusEl = document.getElementById('status');
         const fpsEl = document.getElementById('fps');
