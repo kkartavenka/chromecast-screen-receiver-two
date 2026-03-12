@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChromeCast WebRTC Receiver</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            color: #fff;
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #videoContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #remoteVideo {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 15px 20px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 10;
+            transition: opacity 0.3s;
+        }
+        #status {
+            font-size: 14px;
+            padding: 4px 12px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.1);
+        }
+        #fps {
+            font-size: 14px;
+            font-family: 'Consolas', monospace;
+            color: #0f0;
+        }
+        .connecting { color: #ff0; }
+        .connected { color: #0f0; }
+        .error { color: #f00; }
+        #splashScreen {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, #1a1a2e, #000);
+            z-index: 20;
+            transition: opacity 0.5s;
+        }
+        #splashScreen h1 { font-size: 28px; margin-bottom: 10px; }
+        #splashScreen p { color: #888; font-size: 16px; }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top: 3px solid #4285f4;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .hidden { opacity: 0; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="splashScreen">
+        <h1>ChromeCast WebRTC Receiver</h1>
+        <div class="spinner"></div>
+        <p id="splashStatus">Connecting to signaling server...</p>
+    </div>
+
+    <div id="videoContainer">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div id="overlay">
+            <span id="status" class="connecting">Connecting...</span>
+            <span id="fps">FPS: --</span>
+        </div>
+    </div>
+
+    <script>
+        const WS_URL = `ws://${location.hostname}:8089`;
+        const statusEl = document.getElementById('status');
+        const fpsEl = document.getElementById('fps');
+        const splashEl = document.getElementById('splashScreen');
+        const splashStatusEl = document.getElementById('splashStatus');
+        const videoEl = document.getElementById('remoteVideo');
+
+        let pc = null;
+        let ws = null;
+        let frameCount = 0;
+        let lastFpsTime = performance.now();
+
+        function log(msg) { console.log(`[Receiver] ${msg}`); }
+
+        function setStatus(text, cls) {
+            statusEl.textContent = text;
+            statusEl.className = cls || '';
+            splashStatusEl.textContent = text;
+        }
+
+        function connectWebSocket() {
+            log(`Connecting to ${WS_URL}`);
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                log('WebSocket connected');
+                setStatus('Signaling connected', 'connecting');
+                ws.send(JSON.stringify({ type: 'Ready', payload: 'browser-receiver' }));
+            };
+
+            ws.onmessage = async (evt) => {
+                const msg = JSON.parse(evt.data);
+                log(`WS received: ${msg.type}`);
+
+                switch (msg.type) {
+                    case 'SdpOffer':
+                        await handleOffer(msg.payload);
+                        break;
+                    case 'IceCandidate':
+                        await handleIceCandidate(msg.payload);
+                        break;
+                }
+            };
+
+            ws.onclose = () => {
+                log('WebSocket disconnected');
+                setStatus('Disconnected - retrying...', 'error');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (err) => {
+                log(`WebSocket error: ${err}`);
+                setStatus('Connection error', 'error');
+            };
+        }
+
+        async function handleOffer(sdp) {
+            log('Creating peer connection');
+
+            pc = new RTCPeerConnection({
+                iceServers: []
+            });
+
+            pc.ontrack = (event) => {
+                log(`Track received: ${event.track.kind}`);
+                if (event.track.kind === 'video') {
+                    videoEl.srcObject = event.streams[0];
+                    splashEl.classList.add('hidden');
+                    setStatus('Streaming', 'connected');
+                    startFpsCounter();
+                }
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    log(`Sending ICE candidate`);
+                    ws.send(JSON.stringify({
+                        type: 'IceCandidate',
+                        payload: JSON.stringify(event.candidate.toJSON())
+                    }));
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                log(`Connection state: ${pc.connectionState}`);
+                if (pc.connectionState === 'connected') {
+                    setStatus('Connected', 'connected');
+                } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                    setStatus('Disconnected', 'error');
+                }
+            };
+
+            pc.addTransceiver('video', { direction: 'recvonly' });
+
+            const offer = new RTCSessionDescription({ type: 'offer', sdp: sdp });
+            await pc.setRemoteDescription(offer);
+            log('Remote description set');
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            log('Local description set');
+
+            ws.send(JSON.stringify({
+                type: 'SdpAnswer',
+                payload: answer.sdp
+            }));
+        }
+
+        async function handleIceCandidate(candidateJson) {
+            try {
+                const candidate = JSON.parse(candidateJson);
+                if (pc && candidate.candidate) {
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                    log('Added remote ICE candidate');
+                }
+            } catch (e) {
+                log(`ICE error: ${e}`);
+            }
+        }
+
+        function startFpsCounter() {
+            const video = videoEl;
+            let lastFrames = 0;
+
+            setInterval(() => {
+                if (video.getVideoPlaybackQuality) {
+                    const q = video.getVideoPlaybackQuality();
+                    const frames = q.totalVideoFrames - lastFrames;
+                    lastFrames = q.totalVideoFrames;
+                    fpsEl.textContent = `FPS: ${frames}`;
+                }
+            }, 1000);
+        }
+
+        connectWebSocket();
+    </script>
+</body>
+</html>
