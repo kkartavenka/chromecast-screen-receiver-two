@@ -305,15 +305,32 @@
                 log('RTCPeerConnection created');
 
                 pc.ontrack = (event) => {
-                    log(`Track received: ${event.track.kind}, streams: ${event.streams.length}`);
-                    if (event.track.kind === 'video') {
-                        const stream = event.streams[0] || new MediaStream([event.track]);
-                        log(`Using stream with ${stream.getTracks().length} track(s), id=${stream.id}`);
+                    const track = event.track;
+                    log(`Track received: kind=${track.kind}, readyState=${track.readyState}, muted=${track.muted}, streams=${event.streams.length}`);
+
+                    if (track.kind === 'video') {
+                        track.onmute = () => log('Video track MUTED', 'warn');
+                        track.onunmute = () => log('Video track UNMUTED');
+                        track.onended = () => log('Video track ENDED', 'err');
+
+                        const stream = event.streams[0] || new MediaStream([track]);
+                        log(`Stream id=${stream.id}, tracks=${stream.getTracks().length}, active=${stream.active}`);
+
+                        videoEl.onloadedmetadata = () => log(`VIDEO loadedmetadata: ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+                        videoEl.onloadeddata = () => log('VIDEO loadeddata');
+                        videoEl.onplaying = () => log('VIDEO playing');
+                        videoEl.onwaiting = () => log('VIDEO waiting', 'warn');
+                        videoEl.onstalled = () => log('VIDEO stalled', 'warn');
+                        videoEl.onerror = () => log('VIDEO error: ' + (videoEl.error?.message || videoEl.error?.code), 'err');
+                        videoEl.onresize = () => log(`VIDEO resize: ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+
                         videoEl.srcObject = stream;
                         videoEl.play().then(() => {
-                            log('Video play() started');
+                            log(`Video play() OK - paused=${videoEl.paused}, readyState=${videoEl.readyState}`);
                         }).catch(e => {
                             log('Video play() error: ' + e.message, 'err');
+                            videoEl.muted = true;
+                            videoEl.play().catch(e2 => log('Retry play() error: ' + e2.message, 'err'));
                         });
                         splashEl.classList.add('hidden');
                         setStatus('Streaming', 'connected');
@@ -335,7 +352,7 @@
                     log(`WebRTC state: ${pc.connectionState}`);
                     if (pc.connectionState === 'connected') {
                         setStatus('Connected', 'connected');
-                        debugLogEl.style.display = 'none';
+                        startDiagnostics();
                     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
                         setStatus('Disconnected', 'error');
                     }
@@ -353,7 +370,15 @@
                 }
 
                 const answer = await pc.createAnswer();
-                log('Answer SDP (first 200): ' + answer.sdp.substring(0, 200));
+                log('=== ANSWER SDP ===');
+                answer.sdp.split('\r\n').forEach(line => {
+                    if (line.startsWith('a=rtpmap') || line.startsWith('a=fmtp') ||
+                        line.startsWith('m=') || line.startsWith('a=recvonly') ||
+                        line.startsWith('a=sendrecv') || line.startsWith('a=sendonly') ||
+                        line.startsWith('a=inactive') || line.includes('H264') ||
+                        line.includes('h264') || line.includes('VP8') || line.includes('VP9'))
+                        log('  SDP: ' + line);
+                });
 
                 await pc.setLocalDescription(answer);
                 log('Local description set (answer applied)');
@@ -401,14 +426,80 @@
 
         function startFpsCounter() {
             let lastFrames = 0;
-            setInterval(() => {
+            let lastBytes = 0;
+            setInterval(async () => {
                 if (videoEl.getVideoPlaybackQuality) {
                     const q = videoEl.getVideoPlaybackQuality();
                     const frames = q.totalVideoFrames - lastFrames;
                     lastFrames = q.totalVideoFrames;
                     fpsEl.textContent = `FPS: ${frames}`;
                 }
-            }, 1000);
+
+                if (pc) {
+                    try {
+                        const stats = await pc.getStats();
+                        stats.forEach(report => {
+                            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                                const newBytes = report.bytesReceived - lastBytes;
+                                lastBytes = report.bytesReceived;
+                                fpsEl.textContent += ` | ${(newBytes/1024).toFixed(0)}KB/s`;
+                                log(`[STATS] pkts=${report.packetsReceived} bytes=${report.bytesReceived} (+${newBytes}) framesDecoded=${report.framesDecoded} framesDropped=${report.framesDropped} pktLost=${report.packetsLost} jitter=${report.jitter?.toFixed(3)} nackCount=${report.nackCount}`);
+                            }
+                        });
+                    } catch (e) {
+                        log('getStats error: ' + e.message, 'warn');
+                    }
+                }
+            }, 2000);
+        }
+
+        let _diagStarted = false;
+        function startDiagnostics() {
+            if (_diagStarted) return;
+            _diagStarted = true;
+            log('=== DIAGNOSTICS STARTED ===');
+
+            setInterval(async () => {
+                log(`[DIAG] video: paused=${videoEl.paused} readyState=${videoEl.readyState} ${videoEl.videoWidth}x${videoEl.videoHeight} currentTime=${videoEl.currentTime.toFixed(2)}`);
+
+                if (videoEl.srcObject) {
+                    videoEl.srcObject.getTracks().forEach(t => {
+                        log(`[DIAG] track: kind=${t.kind} state=${t.readyState} muted=${t.muted} enabled=${t.enabled}`);
+                    });
+                }
+
+                if (pc) {
+                    log(`[DIAG] pc: conn=${pc.connectionState} ice=${pc.iceConnectionState} gather=${pc.iceGatheringState} signal=${pc.signalingState}`);
+
+                    try {
+                        const stats = await pc.getStats();
+                        let hasVideo = false;
+                        stats.forEach(report => {
+                            if (report.type === 'codec') {
+                                log(`[DIAG] codec: ${report.mimeType} pt=${report.payloadType} clock=${report.clockRate}`);
+                            }
+                            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                                hasVideo = true;
+                                log(`[DIAG] inbound-rtp: bytes=${report.bytesReceived} pkts=${report.packetsReceived} decoded=${report.framesDecoded} dropped=${report.framesDropped} lost=${report.packetsLost} decoderImpl=${report.decoderImplementation}`);
+                                if (report.bytesReceived > 0 && report.framesDecoded === 0) {
+                                    log('[DIAG] >>> BYTES RECEIVED BUT ZERO FRAMES DECODED - likely codec/decoder issue!', 'err');
+                                }
+                                if (report.bytesReceived === 0) {
+                                    log('[DIAG] >>> NO BYTES RECEIVED - RTP not flowing!', 'err');
+                                }
+                            }
+                            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                                log(`[DIAG] ICE pair: local=${report.localCandidateId} remote=${report.remoteCandidateId} bytesSent=${report.bytesSent} bytesRecv=${report.bytesReceived}`);
+                            }
+                        });
+                        if (!hasVideo) {
+                            log('[DIAG] >>> No inbound-rtp video stats found!', 'err');
+                        }
+                    } catch (e) {
+                        log('[DIAG] stats error: ' + e.message, 'warn');
+                    }
+                }
+            }, 5000);
         }
 
         log('Page loaded, calling initSignaling');
