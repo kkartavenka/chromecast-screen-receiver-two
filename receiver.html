@@ -358,6 +358,13 @@
                     }
                 };
 
+                log('=== OFFER SDP (codec lines) ===');
+                sdp.split('\r\n').forEach(line => {
+                    if (line.startsWith('a=rtpmap') || line.startsWith('a=fmtp') ||
+                        line.startsWith('m=') || line.includes('H264') || line.includes('VP8'))
+                        log('  OFFER: ' + line);
+                });
+
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
                 log('Remote description set (offer applied)');
 
